@@ -1,0 +1,40 @@
+name: peprmint-dev
+channels: 
+- conda-forge 
+- salilab 
+- hydroid
+- tpeulen
+- speleo3
+dependencies:
+- python=3.7
+- seaborn
+- pandas
+- biopandas
+- biopython
+- ipywidgets
+- scipy
+- numpy
+- tqdm
+- xmltodict
+- pathlib
+- dssp
+- pytables
+- termcolor
+- requests
+- bs4
+- pip
+- lxml
+- wordcloud
+- nglview
+- mdanalysis
+- weasyprint
+- openpyxl
+- pymol-open-source
+- tmalign
+- voila
+- pip:
+  - pbxplore 
+  - freesasa 
+  - vg
+  - pandarallel
+  - ipyfilechooser

@@ -1,0 +1,51 @@
+############################
+# Data & Results
+############################
+data/
+datasets/
+raw_data/
+processed_data/
+results/
+outputs/
+figures/
+
+############################
+# Trained models
+############################
+models/
+*.joblib
+*.pkl
+*.pt
+*.pth
+*.h5
+
+############################
+# Bioinformatics files
+############################
+*.pdb
+*.cif
+*.mmcif
+*.fasta
+*.fa
+
+############################
+# Python & Jupyter
+############################
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+############################
+# Environments
+############################
+.env
+*.env
+.venv/
+venv/
+
+############################
+# OS
+############################
+.DS_Store
+Thumbs.db
+
