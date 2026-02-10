@@ -2,20 +2,23 @@
 Machine learning pipeline for IBS residue prediction.
 
 This module provides:
+- parquet loading
 - preprocessing
-- class imbalance handling
 - protein-level train/val/test splitting
+- class imbalance handling
 - model training
-- model evaluation
-
+- probability-based evaluation
+- neighborhood probability smoothing
 """
 
 from typing import Tuple, Dict, List
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
+import joblib
 
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import (
     classification_report,
     confusion_matrix,
@@ -23,19 +26,17 @@ from sklearn.metrics import (
     average_precision_score,
     matthews_corrcoef
 )
-from sklearn.pipeline import Pipeline
-from sklearn.ensemble import RandomForestClassifier
 
-import optuna
-from pathlib import Path
-import joblib
+# ======================================================
+# Paths & constants
+# ======================================================
 
-BASE_DIR = Path(__file__).resolve().parent # BASE_DIR = thesis_code/data_analysis
-MODEL_DIR = BASE_DIR / "models"            # MODEL_DIR = thesis_code/data_analysis/models
+BASE_DIR = Path(__file__).resolve().parent
+MODEL_DIR = BASE_DIR / "models"
 MODEL_DIR.mkdir(exist_ok=True)
 
-
 RANDOM_STATE = 42
+
 
 # ======================================================
 # 0. Parquet loading
@@ -45,54 +46,20 @@ def load_parquet(
     path: str | Path,
     columns: List[str] | None = None
 ) -> pd.DataFrame:
-    """
-    Load a single parquet file.
-
-    Parameters
-    ----------
-    path : str or Path
-        Path to parquet file.
-    columns : list, optional
-        Columns to load (None loads all).
-
-    Returns
-    -------
-    df : pd.DataFrame
-        Loaded dataframe.
-    """
-
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"Parquet file not found: {path}")
+    return pd.read_parquet(path, columns=columns)
 
-    df = pd.read_parquet(path, columns=columns)
-    return df
 
 def load_multiple_parquets(
     paths: Dict[str, str | Path],
     columns: List[str] | None = None
 ) -> Dict[str, pd.DataFrame]:
-    """
-    Load multiple parquet files into a dictionary.
-
-    Parameters
-    ----------
-    paths : dict
-        Dictionary mapping dataset name -> parquet path.
-    columns : list, optional
-        Columns to load.
-
-    Returns
-    -------
-    data : dict
-        Dictionary mapping dataset name -> DataFrame.
-    """
-
-    data = {}
-    for name, path in paths.items():
-        data[name] = load_parquet(path, columns=columns)
-
-    return data
+    return {
+        name: load_parquet(path, columns)
+        for name, path in paths.items()
+    }
 
 
 # ======================================================
@@ -102,15 +69,8 @@ def load_multiple_parquets(
 def preprocess(
     df: pd.DataFrame,
     target_col: str = "IBS",
-    drop_cols: List[str] = None
+    drop_cols: List[str] | None = None
 ) -> Tuple[pd.DataFrame, pd.Series]:
-    """
-    Structural preprocessing: split features and target,
-    drop identifier columns.
-
-    No encoding or scaling is applied here.
-    """
-
     if drop_cols is None:
         drop_cols = []
 
@@ -120,9 +80,8 @@ def preprocess(
     return X, y
 
 
-
 # ======================================================
-# 2. Protein-level train / val / test split
+# 2. Protein-level splitting
 # ======================================================
 
 def protein_level_split(
@@ -130,16 +89,8 @@ def protein_level_split(
     protein_col: str,
     val_size: float = 0.15,
     test_size: float = 0.15,
-    random_state: int = 42
+    random_state: int = RANDOM_STATE
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Perform protein-level train/val/test split.
-
-    Returns
-    -------
-    train_prot, val_prot, test_prot
-        Arrays of protein identifiers.
-    """
 
     proteins = df[protein_col].unique()
 
@@ -150,25 +101,16 @@ def protein_level_split(
         shuffle=True
     )
 
-    val_fraction = val_size / (val_size + test_size)
+    val_frac = val_size / (val_size + test_size)
 
     val_prot, test_prot = train_test_split(
         temp_prot,
-        test_size=1 - val_fraction,
+        test_size=1 - val_frac,
         random_state=random_state,
         shuffle=True
     )
 
     return train_prot, val_prot, test_prot
-
-def prepare_ml_inputs(
-    df: pd.DataFrame,
-    target_col: str,
-    drop_cols: list[str]
-):
-    X = df.drop(columns=drop_cols)
-    y = df[target_col]
-    return X, y
 
 
 # ======================================================
@@ -180,28 +122,23 @@ def calculate_class_weights(
     pos_scale: float = 1.0
 ) -> Dict[int, float]:
     """
-    Compute balanced class weights with optional scaling
-    of the positive (IBS) class.
-
-    pos_scale > 1.0 increases recall
-    pos_scale < 1.0 increases precision
+    Balanced inverse-frequency class weights with optional
+    scaling of the positive (IBS) class.
     """
 
     classes, counts = np.unique(y, return_counts=True)
-    total_samples = len(y)
+    total = len(y)
     n_classes = len(classes)
 
     class_weights = {
-        cls: total_samples / (n_classes * count)
+        cls: total / (n_classes * count)
         for cls, count in zip(classes, counts)
     }
 
-    # Scale positive class (IBS = 1)
     if 1 in class_weights:
         class_weights[1] *= pos_scale
 
     return class_weights
-
 
 
 # ======================================================
@@ -212,111 +149,136 @@ def train_model(
     model,
     X_train: pd.DataFrame,
     y_train: pd.Series,
-    class_weights: Dict[int, float] = None
+    class_weights: Dict[int, float] | None = None
 ):
-    """
-    Train a model with optional class weights.
-
-    Parameters
-    ----------
-    model : sklearn estimator
-        Model instance.
-    X_train : pd.DataFrame
-    y_train : pd.Series
-    class_weights : dict, optional
-
-    Returns
-    -------
-    model
-        Trained model.
-    """
-
-    if class_weights is not None:
-        if hasattr(model, "class_weight"):
-            model.set_params(class_weight=class_weights)
+    if class_weights is not None and hasattr(model, "class_weight"):
+        model.set_params(class_weight=class_weights)
 
     model.fit(X_train, y_train)
     return model
 
-from sklearn.metrics import average_precision_score
 
 def train_and_score(
     model,
     X_train,
     y_train,
     X_val,
-    y_val
-):
-    class_weights = calculate_class_weights(y_train)
-
-    model = train_model(
-        model,
-        X_train,
-        y_train,
-        class_weights=class_weights
-    )
+    y_val,
+    pos_scale: float = 1.0
+) -> float:
+    class_weights = calculate_class_weights(y_train, pos_scale)
+    model = train_model(model, X_train, y_train, class_weights)
 
     y_val_proba = model.predict_proba(X_val)[:, 1]
     return average_precision_score(y_val, y_val_proba)
-
 
 
 # ======================================================
 # 5. Model evaluation
 # ======================================================
 
+def predict_with_threshold(
+    model,
+    X: pd.DataFrame,
+    threshold: float
+) -> tuple[np.ndarray, np.ndarray]:
+    y_proba = model.predict_proba(X)[:, 1]
+    y_pred = (y_proba >= threshold).astype(int)
+    return y_pred, y_proba
+
+
+def smooth_probabilities(
+    df: pd.DataFrame,
+    prob_col: str,
+    neighbors_col: str,
+    alpha: float = 0.7
+) -> np.ndarray:
+    smoothed = np.zeros(len(df))
+
+    for i, row in df.iterrows():
+        neighbors = row[neighbors_col]
+
+        if neighbors is None or len(neighbors) == 0:
+            smoothed[i] = row[prob_col]
+        else:
+            neigh_mean = df.loc[neighbors, prob_col].mean()
+            smoothed[i] = alpha * row[prob_col] + (1 - alpha) * neigh_mean
+
+    return smoothed
+
+
+def find_best_threshold(
+    y_true: np.ndarray,
+    y_score: np.ndarray,
+    min_recall: float = 0.6
+) -> float:
+    precision, recall, thresholds = precision_recall_curve(y_true, y_score)
+
+    precision = precision[:-1]
+    recall = recall[:-1]
+
+    valid = recall >= min_recall
+    if not np.any(valid):
+        return 0.5
+
+    idx = np.argmax(precision[valid])
+    return thresholds[valid][idx]
+
+
 def evaluate_model(
     model,
     X: pd.DataFrame,
     y: pd.Series,
+    df_eval: pd.DataFrame | None = None,
+    neighbors_col: str | None = None,
+    threshold: float = 0.5,
+    smooth: bool = False,
+    alpha: float = 0.7,
     split_name: str = "Test"
 ) -> Dict[str, float]:
-    """
-    Evaluate a trained model.
 
-    Parameters
-    ----------
-    model : sklearn estimator
-    X : pd.DataFrame
-    y : pd.Series
-    split_name : str
+    y_pred, y_proba = predict_with_threshold(model, X, threshold)
 
-    Returns
-    -------
-    metrics : dict
-        Evaluation metrics.
-    """
+    if smooth:
+        if df_eval is None or neighbors_col is None:
+            raise ValueError("df_eval and neighbors_col required for smoothing")
 
-    y_pred = model.predict(X)
+        tmp = df_eval.copy()
+        tmp["y_proba_raw"] = y_proba
 
-    if hasattr(model, "predict_proba"):
-        y_score = model.predict_proba(X)[:, 1]
-    else:
-        y_score = y_pred
+        y_proba = smooth_probabilities(
+            tmp,
+            prob_col="y_proba_raw",
+            neighbors_col=neighbors_col,
+            alpha=alpha
+        )
 
-    ap = average_precision_score(y, y_score)
+        y_pred = (y_proba >= threshold).astype(int)
+
+    pr_auc = average_precision_score(y, y_proba)
     mcc = matthews_corrcoef(y, y_pred)
 
     print(f"\n===== {split_name} evaluation =====")
     print(classification_report(y, y_pred, digits=3))
     print("Confusion matrix:")
     print(confusion_matrix(y, y_pred))
+    print(f"PR-AUC: {pr_auc:.4f}")
+    print(f"MCC:    {mcc:.4f}")
 
-    metrics = {
-        "average_precision": ap,
-        "mcc": mcc
+    return {
+        "pr_auc": pr_auc,
+        "mcc": mcc,
+        "threshold": threshold,
+        "smoothing": smooth,
+        "alpha": alpha
     }
 
-    return metrics
 
 # ======================================================
-# 6. Save Models
+# 6. Model persistence
 # ======================================================
 
-def save_model(model, name: str):
-    """
-    Save a trained sklearn Pipeline to thesis_code/data_analysis/models
-    """
+def save_model(model, name: str) -> Path:
     path = MODEL_DIR / f"{name}.joblib"
     joblib.dump(model, path)
     print(f"Model saved to: {path}")
@@ -324,9 +286,6 @@ def save_model(model, name: str):
 
 
 def load_model(name: str):
-    """
-    Load a trained sklearn Pipeline from thesis_code/data_analysis/models
-    """
     path = MODEL_DIR / f"{name}.joblib"
     if not path.exists():
         raise FileNotFoundError(f"Model not found: {path}")
