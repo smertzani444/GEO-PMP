@@ -175,27 +175,16 @@ def prepare_ml_inputs(
 # 3. Class imbalance handling
 # ======================================================
 
-def calculate_class_weights(y: pd.Series) -> Dict[int, float]:
+def calculate_class_weights(
+    y: pd.Series,
+    pos_scale: float = 1.0
+) -> Dict[int, float]:
     """
-    Compute balanced class weights using inverse class frequency.
+    Compute balanced class weights with optional scaling
+    of the positive (IBS) class.
 
-    The weight for each class c is defined as:
-        w_c = N / (K * N_c)
-
-    where:
-        N   = total number of samples
-        K   = number of classes
-        N_c = number of samples in class c
-
-    Parameters
-    ----------
-    y : pd.Series
-        Target vector (training labels only).
-
-    Returns
-    -------
-    Dict[int, float]
-        Dictionary mapping class label -> weight.
+    pos_scale > 1.0 increases recall
+    pos_scale < 1.0 increases precision
     """
 
     classes, counts = np.unique(y, return_counts=True)
@@ -207,7 +196,12 @@ def calculate_class_weights(y: pd.Series) -> Dict[int, float]:
         for cls, count in zip(classes, counts)
     }
 
+    # Scale positive class (IBS = 1)
+    if 1 in class_weights:
+        class_weights[1] *= pos_scale
+
     return class_weights
+
 
 
 # ======================================================
